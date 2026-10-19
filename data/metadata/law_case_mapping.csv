@@ -1,0 +1,36 @@
+law_id,case_id,legal_topic,relevance
+L001,C001,Basic Structure Doctrine,High
+L001,C002,Article 21 Due Process,High
+L001,C003,Federalism President Rule,High
+L001,C004,Right to Privacy,High
+L002,C005,Death Penalty,High
+L002,C006,Murder Principles,High
+L002,C007,Culpable Homicide vs Murder,High
+L002,C008,Criminal Conspiracy,Medium
+L003,C009,Arrest Guidelines,High
+L003,C010,Arrest and Bail Procedure,High
+L003,C011,FIR Registration,High
+L003,C012,Speedy Trial,High
+L004,C013,Circumstantial Evidence,High
+L004,C014,Electronic Evidence Section 65B,High
+L004,C015,Electronic Evidence Certification,High
+L004,C016,Privilege and Right to Know,Medium
+L005,C017,Freedom of Speech Online,High
+L005,C014,Electronic Records,High
+L005,C015,Electronic Evidence,High
+L005,C018,Intermediary Liability,High
+L006,C019,Privity of Contract,High
+L006,C020,Contractual Damages and Arbitration,High
+L007,C021,Minority Shareholder Rights,High
+L007,C022,Corporate Governance,High
+L008,C023,Property Transfer by GPA,High
+L009,C023,Registration of Property Documents,High
+L011,C024,Mental Cruelty and Divorce,High
+L012,C025,Daughters Coparcenary Rights,High
+L015,C026,Sexual Harassment Guidelines,High
+L017,C027,Constitutionality of IBC,High
+L018,C028,CCI Jurisdiction and Telecom Sector,High
+L019,C029,RERA Jurisdiction and Homebuyer Rights,High
+L020,C004,Right to Privacy,High
+L020,C030,Internet Freedom and Privacy,High
+L020,C017,Digital Rights and Free Speech,Medium

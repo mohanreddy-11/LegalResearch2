@@ -11,8 +11,11 @@ from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_nvidia_ai_endpoints import ChatNVIDIA
 
+from pathlib import Path
+
 from config import (
     VECTORSTORE_PATH,
+    DATA_PATH,
     METADATA_PATH,
     EMBEDDING_MODEL,
     LLM_MODEL,
@@ -25,7 +28,7 @@ from config import (
     MAX_CASES,
 )
 from prompts import RAG_PROMPT
-from case_lookup import law_info, find_related_cases, format_cases
+from case_lookup import law_info, find_related_cases
 
 
 # ============================================================
@@ -65,8 +68,11 @@ def load_retriever():
 def load_llm():
     return ChatNVIDIA(
         model=LLM_MODEL,
-        temperature=0,
+        # This app needs a short direct answer; the API otherwise defaults to
+        # spending tokens on a reasoning trace before returning the answer.
+        temperature=1,
         max_tokens=LLM_MAX_TOKENS,
+        model_kwargs={"chat_template_kwargs": {"enable_thinking": False}},
     )
 
 
@@ -99,24 +105,31 @@ def build_context(docs) -> str:
     return "\n\n".join(parts)
 
 
-def extract_sources(docs) -> List[str]:
-    """'Constitution of India - Pages 12, 15' in relevance order."""
-    grouped: Dict[str, List[int]] = {}
+def extract_sources(docs) -> List[Dict]:
+    """Build page-level source links in the order documents were retrieved."""
+    grouped: Dict[str, Dict] = {}
 
     for doc in docs:
-        _, law_name = law_info(doc.metadata.get("source", "Unknown"), METADATA_PATH)
+        source = doc.metadata.get("source", "")
+        _, law_name = law_info(source or "Unknown", METADATA_PATH)
         page = doc.metadata.get("page")
-        pages = grouped.setdefault(law_name, [])
-        if isinstance(page, int) and page + 1 not in pages:
-            pages.append(page + 1)
+        group = grouped.setdefault(law_name, {"pages": set(), "filename": None})
+        filename = Path(str(source)).name
+        if filename.lower().endswith(".pdf") and (DATA_PATH / "laws" / filename).is_file():
+            group["filename"] = filename
+        if isinstance(page, int) and page >= 0:
+            group["pages"].add(page + 1)
 
     sources = []
-    for law_name, pages in grouped.items():
-        if pages:
-            label = "Page" if len(pages) == 1 else "Pages"
-            sources.append(f"{law_name} ({label} {', '.join(map(str, sorted(pages)))})")
-        else:
-            sources.append(law_name)
+    for law_name, info in grouped.items():
+        for page in sorted(info["pages"]):
+            sources.append({
+                "label": f"{law_name} — Page {page}",
+                "filename": info["filename"],
+                "page": page,
+            })
+        if not info["pages"]:
+            sources.append({"label": law_name, "filename": info["filename"], "page": None})
     return sources
 
 
@@ -178,7 +191,7 @@ def _strip_thinking(chunks: Iterator[str]) -> Iterator[str]:
 # Main RAG function
 # ============================================================
 
-def ask_legal_question_stream(question: str) -> Dict:
+def ask_legal_question_stream(question: str, history=None) -> Dict:
     """
     Returns {"stream": <generator of text>, "sources": [...], "cases": [...]}.
     Retrieval happens immediately; the answer streams as the model writes it.
@@ -187,7 +200,27 @@ def ask_legal_question_stream(question: str) -> Dict:
         retriever = load_retriever()
         llm = load_llm()
 
-        docs = retriever.invoke(question)
+        history = history or []
+        prior_user_questions = [
+            str(message.get("content", "")).strip()
+            for message in history
+            if message.get("role") == "user" and str(message.get("content", "")).strip()
+        ][-2:]
+        follow_up_markers = (
+            "that", "it", "this", "those", "these", "above", "you mentioned",
+            "what does", "why is", "who was", "which case", "explain more",
+            "tell me more", "what about", "what are its", "what is its",
+            "what are the consequences", "what is the effect", "and the penalty",
+        )
+        is_follow_up = bool(prior_user_questions) and any(
+            marker in question.lower() for marker in follow_up_markers
+        )
+        retrieval_query = question
+        if is_follow_up:
+            retrieval_query = "\n".join(
+                [f"Earlier topic: {prior_user_questions[-1]}", f"Follow-up: {question}"]
+            )
+        docs = retriever.invoke(retrieval_query)
 
         if not docs:
             return {
@@ -201,19 +234,38 @@ def ask_legal_question_stream(question: str) -> Dict:
         law_ids = {
             law_info(d.metadata.get("source", ""), METADATA_PATH)[0] for d in docs
         } - {None}
-        cases = find_related_cases(question, law_ids, METADATA_PATH, MAX_CASES)
+        cases = find_related_cases(retrieval_query, law_ids, METADATA_PATH, MAX_CASES)
 
         messages = RAG_PROMPT.format_messages(
             context=build_context(docs),
-            cases=format_cases(cases),
             question=question,
+            history=[
+                (message["role"], str(message.get("content", "")))
+                for message in (history[-6:] if is_follow_up else [])
+                if message.get("role") in {"user", "assistant"}
+            ],
         )
 
         def generate():
             try:
-                yield from _strip_thinking(
-                    chunk.content for chunk in llm.stream(messages) if chunk.content
-                )
+                def content_chunks():
+                    for chunk in llm.stream(messages):
+                        content = chunk.content
+                        if isinstance(content, str) and content:
+                            yield content
+                        elif isinstance(content, list):
+                            for part in content:
+                                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                                    yield part["text"]
+
+                answer_text = "".join(_strip_thinking(content_chunks())).strip()
+                if not answer_text:
+                    yield (
+                        "⚠️ NVIDIA returned an empty answer. Check that the configured "
+                        f"model (`{LLM_MODEL}`) is available to your API key, then retry."
+                    )
+                else:
+                    yield answer_text
             except Exception as e:
                 yield friendly_error(e)
 

@@ -40,15 +40,15 @@ EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 # NVIDIA retires models often. Put the model that worked in test_nvidia.py
 # on the DEFAULT line below (replace the name inside the quotes).
 # To switch models later without touching code, add a line like
-#   LLM_MODEL=nvidia/nemotron-3-super-120b-a12b
+#   LLM_MODEL=nvidia/nemotron-3.5-lightning-30b-a3b
 # to your .env file - it overrides the default.
-LLM_MODEL = os.getenv("LLM_MODEL", "nvidia/nemotron-3-super-120b-a12b")
+LLM_MODEL = os.getenv("LLM_MODEL", "nvidia/nemotron-3.5-lightning-30b-a3b")
 LLM_MAX_TOKENS = 900
 
 # -----------------------------
 # Retrieval
 # -----------------------------
-SEARCH_TYPE = "mmr"        # "mmr" = diverse results, "similarity" = plain top-k
+SEARCH_TYPE = "similarity" # Prefer the closest matching passages for precise legal answers.
 TOP_K = 5                  # chunks sent to the LLM (was 3)
 FETCH_K = 20               # candidates considered before MMR picks TOP_K
 MMR_LAMBDA = 0.6           # 1.0 = pure relevance, 0.0 = pure diversity

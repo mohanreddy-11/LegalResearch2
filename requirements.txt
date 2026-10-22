@@ -6,3 +6,4 @@ langchain-nvidia-ai-endpoints==1.4.3
 faiss-cpu==1.14.3
 sentence-transformers==5.6.0
 python-dotenv==1.2.2
+pypdf>=5.0.0

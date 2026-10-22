@@ -37,11 +37,9 @@ EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 # -----------------------------
 # NVIDIA LLM
 # -----------------------------
-# NVIDIA retires models often. Put the model that worked in test_nvidia.py
-# on the DEFAULT line below (replace the name inside the quotes).
-# To switch models later without touching code, add a line like
-#   LLM_MODEL=nvidia/nemotron-3.5-lightning-30b-a3b
-# to your .env file - it overrides the default.
+# Preferred NVIDIA chat model. At startup rag.py checks the models available
+# to this API key, prefers this model (then other Nemotron options), and falls
+# back to another available NVIDIA chat model automatically.
 LLM_MODEL = os.getenv("LLM_MODEL", "nvidia/nemotron-3.5-lightning-30b-a3b")
 LLM_MAX_TOKENS = 900
 

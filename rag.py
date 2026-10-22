@@ -66,94 +66,71 @@ def load_retriever():
 
 @st.cache_resource
 def load_llm():
-    # Prefer the configured Nemotron model, then other lightweight chat models.
-    # NVIDIA's catalog changes over time, so intersect this preference list
-    # with the models currently exposed to the user's API key at app startup.
-    preferred_models = [
-        LLM_MODEL,
-        "nvidia/nemotron-3.5-lightning-30b-a3b",
-        "nvidia/nemotron-3-nano-30b-a3b",
-        "nvidia/nvidia-nemotron-nano-9b-v2",
-        "meta/llama-3.1-8b-instruct",
-    ]
-    try:
-        available_models = ChatNVIDIA.get_available_models()
-    except Exception:
-        # Keep offline startup behavior useful; inference will return a clear
-        # connection/model error if the configured model cannot be reached.
-        available_models = []
-
-    available_by_id = {model.id: model for model in available_models}
-    selected_model = next(
-        (model_id for model_id in dict.fromkeys(preferred_models) if model_id in available_by_id),
-        None,
-    )
-    if selected_model is None and available_models:
-        selected_model = available_models[0].id
-    selected_model = selected_model or LLM_MODEL
-
-    model_kwargs = {}
-    if selected_model.startswith("nvidia/nemotron"):
-        model_kwargs = {"chat_template_kwargs": {"enable_thinking": False}}
-
     return ChatNVIDIA(
-        model=selected_model,
+        model=LLM_MODEL,
+        # This app needs a short direct answer; the API otherwise defaults to
+        # spending tokens on a reasoning trace before returning the answer.
         temperature=1,
         max_tokens=LLM_MAX_TOKENS,
-        model_kwargs=model_kwargs,
+        model_kwargs={"chat_template_kwargs": {"enable_thinking": False}},
     )
-
-
-def active_llm_model() -> str:
-    """Return the model selected from NVIDIA's current available-model list."""
-    return getattr(load_llm(), "model", None) or LLM_MODEL
 
 
 # ============================================================
 # Helpers
 # ============================================================
 
-def build_context(docs) -> tuple[str, List[Dict], List]:
-    """Build model context and matching page links from exactly the same chunks."""
-    parts, sources, source_ids, included_docs = [], [], {}, []
-    used = 0
+def _page_label(doc) -> str:
+    page = doc.metadata.get("page")
+    return f"Page {page + 1}" if isinstance(page, int) else ""
 
-    for doc in docs:
-        source = str(doc.metadata.get("source", ""))
-        raw_page = doc.metadata.get("page")
-        page = raw_page + 1 if isinstance(raw_page, int) and raw_page >= 0 else None
-        filename = Path(source).name if source else ""
-        key = (filename.lower(), page)
 
-        _, law_name = law_info(source or "Unknown", METADATA_PATH)
-        source_id = source_ids.get(key, f"S{len(sources) + 1}")
-        page_label = f"Page {page}" if page is not None else ""
-        chunk = f"[{source_id}] {law_name} {page_label}\n{doc.page_content.strip()}".strip()
+def build_context(docs) -> str:
+    """Label each chunk with its law + page so the model can cite correctly."""
+    parts, used = [], 0
 
-        # Keep each passage whole so the model never cites a page for a claim
-        # supported only by an accidentally cut-off sentence.
-        separator_size = 2 if parts else 0
-        if used + separator_size + len(chunk) > MAX_CONTEXT_CHARS:
+    for i, doc in enumerate(docs, 1):
+        _, law_name = law_info(doc.metadata.get("source", "Unknown"), METADATA_PATH)
+        header = f"[{i}] {law_name} {_page_label(doc)}".strip()
+        chunk = f"{header}\n{doc.page_content.strip()}"
+
+        remaining = MAX_CONTEXT_CHARS - used
+        if remaining < 300:
             break
-
-        if key not in source_ids:
-            source_ids[key] = source_id
-            can_open_pdf = bool(
-                filename.lower().endswith(".pdf")
-                and (DATA_PATH / "laws" / filename).is_file()
-            )
-            sources.append({
-                "id": source_id,
-                "label": f"{law_name} {page_label}".strip(),
-                "filename": filename if can_open_pdf else None,
-                "page": page if can_open_pdf else None,
-            })
+        chunk = chunk[:remaining]
 
         parts.append(chunk)
-        included_docs.append(doc)
-        used += separator_size + len(chunk)
+        used += len(chunk) + 2
 
-    return "\n\n".join(parts), sources, included_docs
+    return "\n\n".join(parts)
+
+
+def extract_sources(docs) -> List[Dict]:
+    """Build page-level source links in the order documents were retrieved."""
+    grouped: Dict[str, Dict] = {}
+
+    for doc in docs:
+        source = doc.metadata.get("source", "")
+        _, law_name = law_info(source or "Unknown", METADATA_PATH)
+        page = doc.metadata.get("page")
+        group = grouped.setdefault(law_name, {"pages": set(), "filename": None})
+        filename = Path(str(source)).name
+        if filename.lower().endswith(".pdf") and (DATA_PATH / "laws" / filename).is_file():
+            group["filename"] = filename
+        if isinstance(page, int) and page >= 0:
+            group["pages"].add(page + 1)
+
+    sources = []
+    for law_name, info in grouped.items():
+        for page in sorted(info["pages"]):
+            sources.append({
+                "label": f"{law_name} — Page {page}",
+                "filename": info["filename"],
+                "page": page,
+            })
+        if not info["pages"]:
+            sources.append({"label": law_name, "filename": info["filename"], "page": None})
+    return sources
 
 
 def friendly_error(e: Exception) -> str:
@@ -161,10 +138,10 @@ def friendly_error(e: Exception) -> str:
 
     if "410" in error or "404" in error or "end of life" in error:
         return (
-            "⚠️ NVIDIA could not serve the selected model. Restart the app to "
-            "refresh NVIDIA's available-model list; the app will choose an "
-            "available chat model automatically. If the problem continues, "
-            "check the API key or NVIDIA service status."
+            "⚠️ The configured NVIDIA model is no longer available.\n\n"
+            f"Current model: `{LLM_MODEL}`\n\n"
+            "Run `python list_models.py`, pick a live model, and set it in "
+            "`config.py` (or `LLM_MODEL=` in `.env`), then restart the app."
         )
     if "Read timed out" in error or "timed out" in error:
         return "⚠️ NVIDIA API timed out. Please try again in a few seconds."
@@ -254,24 +231,13 @@ def ask_legal_question_stream(question: str, history=None) -> Dict:
                 "cases": [],
             }
 
-        context, sources, context_docs = build_context(docs)
-        if not context_docs:
-            return {
-                "stream": iter(
-                    ["I could not find sufficient information in the provided legal documents."]
-                ),
-                "sources": [],
-                "cases": [],
-            }
-
         law_ids = {
-            law_info(d.metadata.get("source", ""), METADATA_PATH)[0]
-            for d in context_docs
+            law_info(d.metadata.get("source", ""), METADATA_PATH)[0] for d in docs
         } - {None}
         cases = find_related_cases(retrieval_query, law_ids, METADATA_PATH, MAX_CASES)
 
         messages = RAG_PROMPT.format_messages(
-            context=context,
+            context=build_context(docs),
             question=question,
             history=[
                 (message["role"], str(message.get("content", "")))
@@ -295,8 +261,8 @@ def ask_legal_question_stream(question: str, history=None) -> Dict:
                 answer_text = "".join(_strip_thinking(content_chunks())).strip()
                 if not answer_text:
                     yield (
-                        "⚠️ NVIDIA returned an empty answer. Check that the selected "
-                        f"model (`{active_llm_model()}`) is available to your API key, then retry."
+                        "⚠️ NVIDIA returned an empty answer. Check that the configured "
+                        f"model (`{LLM_MODEL}`) is available to your API key, then retry."
                     )
                 else:
                     yield answer_text
@@ -305,7 +271,7 @@ def ask_legal_question_stream(question: str, history=None) -> Dict:
 
         return {
             "stream": generate(),
-            "sources": sources,
+            "sources": extract_sources(docs),
             "cases": [f"{c['title']} ({c['year']}) - {c['citation']}" for c in cases],
         }
 

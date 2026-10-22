@@ -4,10 +4,15 @@ from html import escape
 
 import streamlit as st
 
-from case_summary import summarize_case_pdf
-from config import DATA_PATH, LLM_MODEL, METADATA_PATH
-from pdf_server import pdf_page_url
-from rag import ask_legal_question_stream
+from case_summary import (
+    answer_case_question,
+    build_case_qa_index,
+    extract_case_pages,
+    summarize_case_pdf,
+)
+from config import DATA_PATH, METADATA_PATH
+from pdf_server import pdf_page_url, register_uploaded_pdf, uploaded_pdf_page_url
+from rag import active_llm_model, ask_legal_question_stream
 
 
 st.set_page_config(
@@ -114,14 +119,16 @@ def show_sources_and_cases(sources, cases):
         with st.expander("📚 Sources"):
             for source in sources:
                 label = escape(source["label"])
+                source_id = escape(source.get("id", ""))
+                linked_label = f"[{source_id}] {label}" if source_id else label
                 if source.get("filename") and source.get("page"):
                     url = escape(pdf_page_url(source["filename"], source["page"]), quote=True)
                     st.markdown(
-                        f'<a href="{url}" target="_blank" rel="noopener noreferrer">📄 {label} ↗</a>',
+                        f'<a href="{url}" target="_blank" rel="noopener noreferrer">📄 {linked_label} ↗</a>',
                         unsafe_allow_html=True,
                     )
                 else:
-                    st.write(f"• {source['label']}")
+                    st.write(f"• {linked_label}")
 
 
 def render_ask_ai():
@@ -257,6 +264,10 @@ def render_case_summary():
         file_hash.update(block)
     uploaded_file.seek(0)
     file_hash = file_hash.hexdigest()
+    if st.session_state.get("case_qa_file_hash") != file_hash:
+        st.session_state.case_qa_file_hash = file_hash
+        st.session_state.case_qa_index = None
+        st.session_state.case_qa_messages = []
     st.caption(f"Selected file: {uploaded_file.name} · {uploaded_file.size / (1024 * 1024):.1f} MB")
     st.caption("Long PDFs are split into sections, summarized, then combined. Large files take longer and use more model requests.")
 
@@ -284,6 +295,63 @@ def render_case_summary():
         st.subheader(f"Summary: {saved_summary['file_name']}")
         st.markdown(saved_summary["summary"])
 
+    st.divider()
+    st.subheader("Ask about this case")
+    st.caption("Ask a question about the uploaded judgment. Answers use only this case and cite its page numbers.")
+
+    for message in st.session_state.case_qa_messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+            if message["role"] == "assistant" and message.get("pages"):
+                with st.expander("📄 Cited pages in this case"):
+                    token = register_uploaded_pdf(uploaded_file.getvalue(), uploaded_file.name)
+                    for page in message["pages"]:
+                        url = escape(uploaded_pdf_page_url(token, page), quote=True)
+                        st.markdown(
+                            f'<a href="{url}" target="_blank" rel="noopener noreferrer">📄 Page {page} ↗</a>',
+                            unsafe_allow_html=True,
+                        )
+
+    case_question = st.chat_input("Ask a question about this uploaded case...", key="case-qa-input")
+    if case_question:
+        history = st.session_state.case_qa_messages[-6:]
+        st.session_state.case_qa_messages.append({"role": "user", "content": case_question})
+        with st.chat_message("user"):
+            st.markdown(case_question)
+
+        with st.chat_message("assistant"):
+            try:
+                if st.session_state.case_qa_index is None:
+                    with st.spinner("Reading the case and preparing page-level search…"):
+                        pages = extract_case_pages(uploaded_file.getvalue())
+                        st.session_state.case_qa_index = build_case_qa_index(pages, uploaded_file.name)
+                with st.spinner("Searching this case and writing a cited answer…"):
+                    result = answer_case_question(
+                        case_question,
+                        st.session_state.case_qa_index,
+                        history=history,
+                    )
+                answer = result["answer"]
+                st.markdown(answer)
+                if result["pages"]:
+                    with st.expander("📄 Cited pages in this case"):
+                        token = register_uploaded_pdf(uploaded_file.getvalue(), uploaded_file.name)
+                        for page in result["pages"]:
+                            url = escape(uploaded_pdf_page_url(token, page), quote=True)
+                            st.markdown(
+                                f'<a href="{url}" target="_blank" rel="noopener noreferrer">📄 Page {page} ↗</a>',
+                                unsafe_allow_html=True,
+                            )
+                st.session_state.case_qa_messages.append(
+                    {"role": "assistant", "content": answer, "pages": result["pages"]}
+                )
+            except Exception as error:
+                error_message = str(error)
+                st.error(error_message)
+                st.session_state.case_qa_messages.append(
+                    {"role": "assistant", "content": f"I could not answer from this case: {error_message}", "pages": []}
+                )
+
 
 with st.sidebar:
     st.title("⚖️ Legal Research AI")
@@ -297,7 +365,7 @@ with st.sidebar:
         label_visibility="collapsed",
     )
     st.divider()
-    st.caption(f"LLM: `{LLM_MODEL}`")
+    st.caption(f"LLM: `{active_llm_model()}`")
 
 if st.session_state.active_view == "Ask AI":
     render_ask_ai()
